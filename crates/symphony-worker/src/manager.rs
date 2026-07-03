@@ -25,7 +25,7 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 const USER_CANCELLED_SUPPRESSION: &str = "user_cancelled";
@@ -654,6 +654,10 @@ async fn tick<T: TrackerClient>(
                 .iter()
                 .any(|state| state.eq_ignore_ascii_case(&issue.state));
             if !is_active {
+                repo.clear_retry(&retry.issue_id).await?;
+                continue;
+            }
+            if repo.has_active_run(&issue.id).await? {
                 repo.clear_retry(&retry.issue_id).await?;
                 continue;
             }
@@ -1317,6 +1321,24 @@ async fn fail(
 ) -> Result<(), WorkerError> {
     repo.finish_run(&run.id, RunStatus::Failure, Some(class), Some(message))
         .await?;
+    if should_retry_in_fresh_workspace(class, message) {
+        let workspace_path = PathBuf::from(&run.workspace_path);
+        match tokio::fs::remove_dir_all(&workspace_path).await {
+            Ok(()) => info!(
+                run_id = %run.id,
+                issue_id = %run.issue_id,
+                workspace = %workspace_path.display(),
+                "removed workspace before retrying a git metadata failure"
+            ),
+            Err(err) => warn!(
+                run_id = %run.id,
+                issue_id = %run.issue_id,
+                workspace = %workspace_path.display(),
+                error = %err,
+                "could not remove workspace before retrying a git metadata failure"
+            ),
+        }
+    }
     let due = due_after(backoff_ms(
         run.run_number,
         config.workflow.front_matter.agent.max_retry_backoff_ms,
@@ -1330,6 +1352,22 @@ async fn fail(
     )
     .await?;
     Ok(())
+}
+
+fn should_retry_in_fresh_workspace(class: &str, message: &str) -> bool {
+    let class = class.to_ascii_lowercase();
+    let message = message.to_ascii_lowercase();
+    let git_metadata_failure = message.contains("index.lock")
+        || message.contains("read-only file system")
+        || message.contains("operation not permitted")
+        || message.contains("permission denied");
+    git_metadata_failure
+        && (class.contains("agent")
+            || class.contains("dispatch")
+            || class.contains("hook")
+            || class.contains("workspace")
+            || message.contains(".git")
+            || message.contains("git "))
 }
 
 /// Workspaces created before multi-repo support lived at `<root>/<issue>`,
@@ -1929,6 +1967,43 @@ mod tests {
             repo.pending_retry_issue_ids().await.unwrap(),
             vec!["lin-1".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn clears_due_retry_when_issue_already_has_an_active_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let config = runtime_config(temp.path());
+        let stop = CancellationToken::new();
+
+        let active = issue("todo", vec![]);
+        repo.upsert_issues(std::slice::from_ref(&active))
+            .await
+            .unwrap();
+        let run = repo
+            .try_reserve_run("lin-1", 1, "/tmp/ws", Some("widgets"))
+            .await
+            .unwrap()
+            .unwrap();
+        repo.schedule_retry("lin-1", 2, "2000-01-01T00:00:00Z", None, None)
+            .await
+            .unwrap();
+        let tracker = StaticTracker {
+            active: vec![active],
+            terminal: vec![],
+        };
+
+        tick(&repo, &tracker, &config, None, &stop).await.unwrap();
+
+        assert_eq!(
+            repo.get_run(&run.id).await.unwrap().unwrap().status,
+            "pending"
+        );
+        assert!(repo.pending_retry_issue_ids().await.unwrap().is_empty());
+        assert!(repo.due_retries(&now_iso()).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -2733,6 +2808,65 @@ printf cloned > hook-ran
             .unwrap()
             .is_some());
         assert!(repo.pending_retry_issue_ids().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn git_metadata_failures_retry_in_a_fresh_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let config = runtime_config(temp.path());
+        let issue = issue("todo", vec![]);
+        repo.upsert_issues(std::slice::from_ref(&issue))
+            .await
+            .unwrap();
+
+        let repo_config = config.repos[0].clone();
+        let workspace_path = workspace_manager(&config, &repo_config)
+            .path_for(&issue.identifier)
+            .unwrap();
+        tokio::fs::create_dir_all(workspace_path.join(".git"))
+            .await
+            .unwrap();
+        tokio::fs::write(workspace_path.join(crate::WORKSPACE_READY_SENTINEL), "")
+            .await
+            .unwrap();
+        tokio::fs::write(workspace_path.join(".git/index.lock"), "locked")
+            .await
+            .unwrap();
+        let run = repo
+            .try_reserve_run(
+                &issue.id,
+                1,
+                &workspace_path.display().to_string(),
+                Some(&repo_config.name),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        fail(
+            &repo,
+            &config,
+            &run,
+            &issue,
+            "agent_failure",
+            "git add failed: could not create .git/index.lock: Operation not permitted",
+        )
+        .await
+        .unwrap();
+
+        assert!(tokio::fs::metadata(&workspace_path).await.is_err());
+        assert_eq!(
+            repo.get_run(&run.id).await.unwrap().unwrap().status,
+            "failure"
+        );
+        assert_eq!(
+            repo.pending_retry_issue_ids().await.unwrap(),
+            vec![issue.id.clone()]
+        );
     }
 
     #[tokio::test]
