@@ -840,16 +840,67 @@ impl Repository {
     }
 
     pub async fn trigger_retry_now(&self, issue_id: &str) -> Result<bool, StorageError> {
+        if self.has_active_run(issue_id).await? {
+            return Ok(false);
+        }
+
         let result = sqlx::query("update retry_queue set due_at = ?1 where issue_id = ?2")
             .bind(now_iso())
             .bind(issue_id)
             .execute(&self.pool)
             .await?;
-        let updated = result.rows_affected() > 0;
-        if updated {
+        let retry_due = result.rows_affected() > 0;
+        if retry_due {
             self.changed("retry_queue", "update");
         }
-        Ok(updated)
+        if retry_due {
+            self.clear_all_issue_dispatch_suppressions(issue_id).await?;
+            return Ok(true);
+        }
+
+        // A run the user stopped (not one that failed) may have no retry_queue
+        // row at all. Only the latest run should be actionable from the
+        // issue-scoped retry endpoint; older cancelled runs may already have
+        // been superseded by a successful retry.
+        let Some(latest_cancelled_run_number) = self.latest_cancelled_run_number(issue_id).await?
+        else {
+            return Ok(false);
+        };
+
+        self.clear_all_issue_dispatch_suppressions(issue_id).await?;
+        let last_run_number = self.last_run_number(issue_id).await?;
+        let run_number = std::cmp::max(latest_cancelled_run_number, last_run_number) + 1;
+        self.schedule_retry(issue_id, run_number, &now_iso(), None, None)
+            .await?;
+        Ok(true)
+    }
+
+    async fn latest_cancelled_run_number(
+        &self,
+        issue_id: &str,
+    ) -> Result<Option<i64>, StorageError> {
+        let row: Option<(i64, String)> = sqlx::query_as(
+            "select run_number, status from runs where issue_id = ?1 order by run_number desc limit 1",
+        )
+        .bind(issue_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.and_then(|(run_number, status)| (status == "cancelled").then_some(run_number)))
+    }
+
+    async fn clear_all_issue_dispatch_suppressions(
+        &self,
+        issue_id: &str,
+    ) -> Result<bool, StorageError> {
+        let result = sqlx::query("delete from issue_dispatch_suppressions where issue_id = ?1")
+            .bind(issue_id)
+            .execute(&self.pool)
+            .await?;
+        let cleared = result.rows_affected() > 0;
+        if cleared {
+            self.changed("issue_dispatch_suppressions", "delete");
+        }
+        Ok(cleared)
     }
 
     pub async fn pending_retry_issue_ids(&self) -> Result<Vec<String>, StorageError> {
@@ -1525,6 +1576,144 @@ mod tests {
             "lin-1"
         );
         assert!(!repo.trigger_retry_now("missing").await.unwrap());
+    }
+
+    // A user-stopped (not failed) run has no retry_queue row -- it leaves an
+    // issue_dispatch_suppressions row instead, which silently blocks the
+    // dispatcher until the issue's fingerprint changes upstream. "Retry now"
+    // must also clear that, or the button does nothing for a stopped run.
+    #[tokio::test]
+    async fn trigger_retry_now_clears_user_cancelled_suppression() {
+        let repo = repo().await;
+        repo.upsert_issues(&[issue()]).await.unwrap();
+        let run = repo
+            .try_reserve_run("lin-1", 1, "/tmp/ws", Some("widgets"))
+            .await
+            .unwrap()
+            .unwrap();
+        repo.finish_run(
+            &run.id,
+            RunStatus::Cancelled,
+            Some("cancelled"),
+            Some("run cancelled"),
+        )
+        .await
+        .unwrap();
+        repo.suppress_issue_dispatch("lin-1", "user_cancelled", "fingerprint-at-cancel-time")
+            .await
+            .unwrap();
+
+        assert!(repo.trigger_retry_now("lin-1").await.unwrap());
+        assert!(repo
+            .issue_dispatch_suppression("lin-1", "user_cancelled")
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            repo.pending_retry_issue_ids().await.unwrap(),
+            vec!["lin-1".to_string()]
+        );
+        assert_eq!(repo.due_retries(&now_iso()).await.unwrap()[0].run_number, 2);
+    }
+
+    // A cancelled run recorded without a suppression row still needs to be
+    // retryable from the run-detail button.
+    #[tokio::test]
+    async fn trigger_retry_now_queues_cancelled_run_without_suppression() {
+        let repo = repo().await;
+        repo.upsert_issues(&[issue()]).await.unwrap();
+        let run = repo
+            .try_reserve_run("lin-1", 1, "/tmp/ws", Some("widgets"))
+            .await
+            .unwrap()
+            .unwrap();
+        repo.finish_run(
+            &run.id,
+            RunStatus::Cancelled,
+            Some("cancelled"),
+            Some("run cancelled"),
+        )
+        .await
+        .unwrap();
+
+        assert!(repo.trigger_retry_now("lin-1").await.unwrap());
+        assert_eq!(
+            repo.pending_retry_issue_ids().await.unwrap(),
+            vec!["lin-1".to_string()]
+        );
+        assert_eq!(repo.due_retries(&now_iso()).await.unwrap()[0].run_number, 2);
+    }
+
+    #[tokio::test]
+    async fn trigger_retry_now_noops_when_cancelled_run_is_not_latest() {
+        let repo = repo().await;
+        repo.upsert_issues(&[issue()]).await.unwrap();
+        let cancelled = repo
+            .try_reserve_run("lin-1", 1, "/tmp/ws", Some("widgets"))
+            .await
+            .unwrap()
+            .unwrap();
+        repo.finish_run(
+            &cancelled.id,
+            RunStatus::Cancelled,
+            Some("cancelled"),
+            Some("run cancelled"),
+        )
+        .await
+        .unwrap();
+        repo.suppress_issue_dispatch("lin-1", "user_cancelled", "fingerprint-at-cancel-time")
+            .await
+            .unwrap();
+        let retried = repo
+            .try_reserve_run("lin-1", 2, "/tmp/ws", Some("widgets"))
+            .await
+            .unwrap()
+            .unwrap();
+        repo.finish_run(&retried.id, RunStatus::Success, None, None)
+            .await
+            .unwrap();
+
+        assert!(!repo.trigger_retry_now("lin-1").await.unwrap());
+        assert_eq!(
+            repo.issue_dispatch_suppression("lin-1", "user_cancelled")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("fingerprint-at-cancel-time")
+        );
+        assert!(repo.pending_retry_issue_ids().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn trigger_retry_now_noops_when_issue_already_has_active_run() {
+        let repo = repo().await;
+        repo.upsert_issues(&[issue()]).await.unwrap();
+        let cancelled = repo
+            .try_reserve_run("lin-1", 1, "/tmp/ws", Some("widgets"))
+            .await
+            .unwrap()
+            .unwrap();
+        repo.finish_run(
+            &cancelled.id,
+            RunStatus::Cancelled,
+            Some("cancelled"),
+            Some("run cancelled"),
+        )
+        .await
+        .unwrap();
+        let active = repo
+            .try_reserve_run("lin-1", 2, "/tmp/ws", Some("widgets"))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(!repo.trigger_retry_now("lin-1").await.unwrap());
+        assert!(repo.has_active_run("lin-1").await.unwrap());
+        assert!(repo.pending_retry_issue_ids().await.unwrap().is_empty());
+        assert_eq!(
+            repo.get_run(&active.id).await.unwrap().unwrap().status,
+            "pending"
+        );
     }
 
     #[tokio::test]

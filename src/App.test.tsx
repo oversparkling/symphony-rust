@@ -377,6 +377,13 @@ describe("App settings", () => {
     });
   });
 
+  it("marks local development builds distinctly", () => {
+    render(<App />);
+
+    expect(screen.getByText("Local development instance")).toBeTruthy();
+    expect(screen.getByText("Local dev")).toBeTruthy();
+  });
+
   it("does not auto-capitalize repository names", () => {
     render(<App />);
 
@@ -858,7 +865,10 @@ describe("App settings", () => {
 
   it("lets users mark repo skills as installed without installing the bundled set", async () => {
     tauriMocks.runtimeAvailable = true;
-    const settings = testSettings();
+    const settings = {
+      ...testSettings(),
+      session_env: { GH_TOKEN: "from-settings" },
+    };
     tauriMocks.invoke.mockImplementation(
       dashboardInvoke({
         settings,
@@ -876,6 +886,7 @@ describe("App settings", () => {
     await waitFor(() =>
       expect(tauriMocks.invoke).toHaveBeenCalledWith("get_skills_status", {
         repoUrl: settings.repos[0].url.trim(),
+        sessionEnv: settings.session_env,
       }),
     );
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
@@ -900,6 +911,35 @@ describe("App settings", () => {
     ).toBe(true);
   });
 
+  it("rechecks repo skills when the session environment changes", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = testSettings();
+    tauriMocks.invoke.mockImplementation(dashboardInvoke({ settings }));
+
+    render(<App />);
+
+    const repoUrl = settings.repos[0].url.trim();
+    await waitFor(() =>
+      expect(tauriMocks.invoke).toHaveBeenCalledWith("get_skills_status", {
+        repoUrl,
+        sessionEnv: {},
+      }),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.change(
+      screen.getByLabelText(/^Session environment/, { selector: "textarea" }),
+      { target: { value: "GITHUB_TOKEN=from-session" } },
+    );
+
+    await waitFor(() =>
+      expect(tauriMocks.invoke).toHaveBeenCalledWith("get_skills_status", {
+        repoUrl,
+        sessionEnv: { GITHUB_TOKEN: "from-session" },
+      }),
+    );
+  });
+
   it("clears the manual skills mark when the repository URL changes", async () => {
     tauriMocks.runtimeAvailable = true;
     const settings = testSettings();
@@ -920,6 +960,7 @@ describe("App settings", () => {
     await waitFor(() =>
       expect(tauriMocks.invoke).toHaveBeenCalledWith("get_skills_status", {
         repoUrl: settings.repos[0].url.trim(),
+        sessionEnv: settings.session_env,
       }),
     );
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
@@ -968,6 +1009,7 @@ describe("App settings", () => {
     await waitFor(() =>
       expect(tauriMocks.invoke).toHaveBeenCalledWith("get_skills_status", {
         repoUrl: settings.repos[0].url.trim(),
+        sessionEnv: settings.session_env,
       }),
     );
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
@@ -1130,6 +1172,7 @@ describe("App settings", () => {
     await waitFor(() =>
       expect(tauriMocks.invoke).toHaveBeenCalledWith("get_skills_status", {
         repoUrl,
+        sessionEnv: settings.session_env,
       }),
     );
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
@@ -1187,6 +1230,64 @@ describe("App settings", () => {
     await waitFor(() =>
       expect(tauriMocks.invoke).toHaveBeenCalledWith("trigger_retry_now", {
         issueId: "lin-retry-1",
+      }),
+    );
+  });
+
+  it("lets the user retry a cancelled run from the run detail view", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: true };
+    const cancelledRun = runRow({
+      id: "run-cancelled-1",
+      issue_id: "lin-cancelled-1",
+      run_number: 2,
+      status: "cancelled",
+      started_at: "2026-01-01T00:00:00.000Z",
+      ended_at: "2026-01-01T00:10:00.000Z",
+      error_class: "cancelled",
+      error_message: "run cancelled",
+      worker_pid: null,
+      created_at: "2026-01-01T00:00:00.000Z",
+      issue_identifier: "SYM-100",
+      issue_title: "Retry the cancelled run",
+      issue_state: "Todo",
+    });
+    const baseInvoke = dashboardInvoke({
+      settings,
+      overview: {
+        active_runs: [],
+        retry_queue: [],
+        recent_failures: [],
+        live_sessions: [],
+        worker_heartbeat: null,
+        rate_limits: [],
+        token_usage: [],
+      },
+      workerStatus: {
+        state: "running",
+        started_at: "2026-01-01T00:00:00.000Z",
+        last_error: null,
+      },
+    });
+    tauriMocks.invoke.mockImplementation(async (command, args) => {
+      if (command === "list_runs") {
+        return [cancelledRun];
+      }
+      if (command === "get_run_detail" && args?.id === cancelledRun.id) {
+        return { run: cancelledRun, events: [] };
+      }
+      return baseInvoke(command, args);
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Runs" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open run SYM-100 number 2" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Retry run" }));
+
+    await waitFor(() =>
+      expect(tauriMocks.invoke).toHaveBeenCalledWith("trigger_retry_now", {
+        issueId: "lin-cancelled-1",
       }),
     );
   });
