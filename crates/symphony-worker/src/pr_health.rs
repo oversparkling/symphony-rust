@@ -59,16 +59,52 @@ struct GhPrView {
     #[serde(rename = "mergeStateStatus")]
     merge_state_status: String,
     #[serde(rename = "statusCheckRollup", default)]
-    status_check_rollup: Vec<GhCheck>,
+    status_check_rollup: Vec<GhCheckEntry>,
 }
 
 #[derive(Debug, Deserialize)]
-struct GhCheck {
-    name: String,
+struct GhCheckEntry {
+    #[serde(rename = "__typename", default)]
+    typename: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    context: Option<String>,
     #[serde(default)]
     conclusion: Option<String>,
     #[serde(default)]
     status: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct GhCheck {
+    name: String,
+    conclusion: Option<String>,
+    status: Option<String>,
+}
+
+impl GhCheckEntry {
+    fn normalize(self) -> Option<GhCheck> {
+        match self.typename.as_deref() {
+            Some("StatusContext") => Some(GhCheck {
+                name: self.context?,
+                conclusion: self.state,
+                status: None,
+            }),
+            Some("CheckRun") | None => Some(GhCheck {
+                name: self.name?,
+                conclusion: self.conclusion,
+                status: self.status,
+            }),
+            _ => None,
+        }
+    }
+}
+
+fn normalize_checks(entries: Vec<GhCheckEntry>) -> Vec<GhCheck> {
+    entries.into_iter().filter_map(GhCheckEntry::normalize).collect()
 }
 
 pub async fn run_pr_health_monitor<T: TrackerClient>(
@@ -297,8 +333,9 @@ pub async fn check_pr_url(
     }
 
     let payload: GhPrView = serde_json::from_slice(&output.stdout)?;
-    let failing_checks = failing_checks(&payload.status_check_rollup);
-    let checks_status = checks_status(&payload.status_check_rollup, &failing_checks);
+    let checks = normalize_checks(payload.status_check_rollup);
+    let failing_checks = failing_checks(&checks);
+    let checks_status = checks_status(&checks, &failing_checks);
     let health_status = classify_health(
         &payload.state,
         &payload.mergeable,
@@ -370,6 +407,9 @@ fn checks_status(checks: &[GhCheck], failing: &[String]) -> String {
             .status
             .as_deref()
             .is_some_and(|status| status.eq_ignore_ascii_case("IN_PROGRESS"))
+            || check.conclusion.as_deref().is_some_and(|state| {
+                state.eq_ignore_ascii_case("PENDING") || state.eq_ignore_ascii_case("EXPECTED")
+            })
     }) {
         return "pending".to_string();
     }
@@ -513,7 +553,8 @@ mod tests {
             ]
         }"#;
         let payload: GhPrView = serde_json::from_str(raw).unwrap();
-        let failing = failing_checks(&payload.status_check_rollup);
+        let checks = normalize_checks(payload.status_check_rollup);
+        let failing = failing_checks(&checks);
         assert_eq!(failing, vec!["CI".to_string()]);
         assert_eq!(
             classify_health(
@@ -523,6 +564,42 @@ mod tests {
                 &failing
             ),
             PrHealthStatus::CiFailing
+        );
+    }
+
+    #[test]
+    fn parses_status_context_checks() {
+        let raw = r#"{
+            "state": "OPEN",
+            "mergeable": "CONFLICTING",
+            "mergeStateStatus": "DIRTY",
+            "statusCheckRollup": [
+                {
+                    "__typename": "StatusContext",
+                    "context": "Vercel – alligrator",
+                    "state": "FAILURE"
+                },
+                {
+                    "__typename": "CheckRun",
+                    "name": "Vercel Preview Comments",
+                    "conclusion": "SUCCESS",
+                    "status": "COMPLETED"
+                }
+            ]
+        }"#;
+        let payload: GhPrView = serde_json::from_str(raw).unwrap();
+        let checks = normalize_checks(payload.status_check_rollup);
+        assert_eq!(checks.len(), 2);
+        let failing = failing_checks(&checks);
+        assert_eq!(failing, vec!["Vercel – alligrator".to_string()]);
+        assert_eq!(
+            classify_health(
+                &payload.state,
+                &payload.mergeable,
+                &payload.merge_state_status,
+                &failing
+            ),
+            PrHealthStatus::Conflicting
         );
     }
 }
