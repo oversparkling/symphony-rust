@@ -38,6 +38,8 @@ pub trait TrackerClient: Send + Sync {
         &self,
         issue_ids: &[String],
     ) -> Result<Vec<WorkpadComment>, TrackerError>;
+    async fn update_issue_state(&self, issue_id: &str, state_name: &str) -> Result<(), TrackerError>;
+    async fn append_workpad_note(&self, issue_id: &str, note: &str) -> Result<(), TrackerError>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -376,9 +378,77 @@ impl TrackerClient for LinearTracker {
         }
         Ok(workpads)
     }
+
+    async fn update_issue_state(&self, issue_id: &str, state_name: &str) -> Result<(), TrackerError> {
+        let state_id = self.resolve_state_id(issue_id, state_name).await?;
+        let variables = serde_json::json!({
+            "id": issue_id,
+            "stateId": state_id,
+        });
+        let data: IssueUpdateData = self
+            .execute(ISSUE_UPDATE_MUTATION, Some(variables))
+            .await?;
+        if !data.issue_update.success {
+            return Err(TrackerError::Invalid(format!(
+                "Linear issueUpdate did not succeed for {issue_id}"
+            )));
+        }
+        Ok(())
+    }
+
+    async fn append_workpad_note(&self, issue_id: &str, note: &str) -> Result<(), TrackerError> {
+        let Some(workpad) = self.fetch_workpad(issue_id).await? else {
+            return Ok(());
+        };
+        let body = format!("{}\n\n{}", workpad.body.trim_end(), note.trim());
+        let variables = serde_json::json!({
+            "id": workpad.comment_id,
+            "body": body,
+        });
+        let data: CommentUpdateData = self
+            .execute(COMMENT_UPDATE_MUTATION, Some(variables))
+            .await?;
+        if !data.comment_update.success {
+            return Err(TrackerError::Invalid(format!(
+                "Linear commentUpdate did not succeed for workpad on {issue_id}"
+            )));
+        }
+        Ok(())
+    }
 }
 
 impl LinearTracker {
+    async fn resolve_state_id(&self, issue_id: &str, state_name: &str) -> Result<String, TrackerError> {
+        let variables = serde_json::json!({ "id": issue_id });
+        let data: IssueTeamStatesData = self
+            .execute(ISSUE_TEAM_STATES_QUERY, Some(variables))
+            .await?;
+        let Some(issue) = data.issue else {
+            return Err(TrackerError::NotFound);
+        };
+        let Some(team) = issue.team else {
+            return Err(TrackerError::Invalid(format!(
+                "issue {issue_id} has no team for state lookup"
+            )));
+        };
+        let target = state_name.trim().to_ascii_lowercase();
+        team.states
+            .nodes
+            .into_iter()
+            .find(|state| {
+                state
+                    .name
+                    .as_deref()
+                    .is_some_and(|name| name.trim().eq_ignore_ascii_case(&target))
+            })
+            .map(|state| state.id)
+            .ok_or_else(|| {
+                TrackerError::Invalid(format!(
+                    "workflow state {state_name:?} not found for issue {issue_id}"
+                ))
+            })
+    }
+
     async fn fetch_workpad(&self, issue_id: &str) -> Result<Option<WorkpadComment>, TrackerError> {
         let mut comments_cursor: Option<String> = None;
         loop {
@@ -773,6 +843,78 @@ const ISSUE_COMMENTS_QUERY: &str = r#"
   }
 "#;
 
+const ISSUE_TEAM_STATES_QUERY: &str = r#"
+  query SymphonyIssueTeamStates($id: String!) {
+    issue(id: $id) {
+      team {
+        states {
+          nodes { id name }
+        }
+      }
+    }
+  }
+"#;
+
+const ISSUE_UPDATE_MUTATION: &str = r#"
+  mutation SymphonyIssueUpdate($id: String!, $stateId: String!) {
+    issueUpdate(id: $id, input: { stateId: $stateId }) {
+      success
+      issue { id state { name } }
+    }
+  }
+"#;
+
+const COMMENT_UPDATE_MUTATION: &str = r#"
+  mutation SymphonyCommentUpdate($id: String!, $body: String!) {
+    commentUpdate(id: $id, input: { body: $body }) {
+      success
+    }
+  }
+"#;
+
+#[derive(Deserialize)]
+struct IssueTeamStatesData {
+    issue: Option<LinearIssueTeamNode>,
+}
+
+#[derive(Deserialize)]
+struct LinearIssueTeamNode {
+    team: Option<LinearTeamStates>,
+}
+
+#[derive(Deserialize)]
+struct LinearTeamStates {
+    states: LinearWorkflowStateConnection,
+}
+
+#[derive(Deserialize)]
+struct LinearWorkflowStateConnection {
+    nodes: Vec<LinearWorkflowState>,
+}
+
+#[derive(Deserialize)]
+struct LinearWorkflowState {
+    id: String,
+    name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct IssueUpdateData {
+    #[serde(rename = "issueUpdate")]
+    issue_update: MutationResult,
+}
+
+#[derive(Deserialize)]
+struct CommentUpdateData {
+    #[serde(rename = "commentUpdate")]
+    comment_update: MutationResult,
+}
+
+#[derive(Deserialize)]
+struct MutationResult {
+    success: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct StaticTracker {
     pub active: Vec<Issue>,
@@ -807,6 +949,14 @@ impl TrackerClient for StaticTracker {
         _issue_ids: &[String],
     ) -> Result<Vec<WorkpadComment>, TrackerError> {
         Ok(Vec::new())
+    }
+
+    async fn update_issue_state(&self, _issue_id: &str, _state_name: &str) -> Result<(), TrackerError> {
+        Ok(())
+    }
+
+    async fn append_workpad_note(&self, _issue_id: &str, _note: &str) -> Result<(), TrackerError> {
+        Ok(())
     }
 }
 

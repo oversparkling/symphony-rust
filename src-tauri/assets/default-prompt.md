@@ -73,7 +73,7 @@ Route on the issue's current state. Before routing, check whether the branch PR 
 | `Backlog` | Do not modify. Shut down. |
 | `Todo` | Bootstrap workpad (`symphony-workpad` skill), then move to `In Progress`, run Step 1. If a PR is already attached: check `gh pr view --json mergeable,mergeStateStatus` first — a `CONFLICTING`/`DIRTY` PR is the most common reason for a Todo redispatch and the conflicts MUST be resolved (`symphony-pull` skill) before anything else. Then run the `symphony-pr-feedback` sweep before new work. |
 | `In Progress` | Continue Step 1 from existing workpad. |
-| `In Review` | Do not change code or content. Symphony does not re-engage on CI failure or new review comments while in this state — the operator must move the issue back to `Todo`/`In Progress`/`Rework` to re-engage. |
+| `In Review` | Do not change code or content. Symphony monitors linked PRs while in this state — if `main` moves and the PR becomes `CONFLICTING`/`DIRTY`, or required CI checks fail, Symphony auto-moves the issue to `Todo` (configurable) and redispatches to resolve. Human review comments still require the operator to move the issue back to `Todo`/`In Progress`/`Rework` to re-engage. |
 | `Merging` (PR already `MERGED`) | Skip land procedure; record merge SHA in workpad; move to `Done`. |
 | `Merging` (any other PR state) | Run the `symphony-land` skill. |
 | `Rework` | Run Step 3 (full reset). |

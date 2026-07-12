@@ -1,6 +1,7 @@
 mod backoff;
 mod hooks;
 mod manager;
+mod pr_health;
 mod skills;
 mod workspace;
 

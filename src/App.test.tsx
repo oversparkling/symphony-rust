@@ -62,6 +62,12 @@ function testSettings(): AppSettings {
     tracker_assigned_to_me: false,
     active_states: ["Todo"],
     terminal_states: ["Done"],
+    pr_health_enabled: true,
+    watch_states: ["In Review"],
+    conflict_target_state: "Todo",
+    auto_move_on_conflict: true,
+    auto_move_on_ci_failure: true,
+    ci_failure_target_state: "Todo",
     polling_interval_ms: 60_000,
     max_concurrent_agents: 1,
     max_retry_backoff_ms: 300_000,
@@ -311,6 +317,11 @@ function issueRow({
       project_slug_id: null,
     }),
     last_seen_at: "2026-01-01T00:00:00.000Z",
+    pr_health_status: null,
+    pr_health_mergeable: null,
+    pr_health_checks_status: null,
+    pr_health_failing_checks: null,
+    pr_health_checked_at: null,
   };
 }
 

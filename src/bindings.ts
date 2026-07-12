@@ -44,6 +44,12 @@ export type AppSettings = {
   tracker_assigned_to_me: boolean;
   active_states: string[];
   terminal_states: string[];
+  pr_health_enabled: boolean;
+  watch_states: string[];
+  conflict_target_state: string;
+  auto_move_on_conflict: boolean;
+  auto_move_on_ci_failure: boolean;
+  ci_failure_target_state: string;
   polling_interval_ms: number;
   max_concurrent_agents: number;
   max_retry_backoff_ms: number;
@@ -332,6 +338,25 @@ export type IssueRow = {
   pr_urls: string;
   raw: string;
   last_seen_at: string;
+  pr_health_status: string | null;
+  pr_health_mergeable: string | null;
+  pr_health_checks_status: string | null;
+  pr_health_failing_checks: string | null;
+  pr_health_checked_at: string | null;
+};
+
+export type PrHealthRow = {
+  issue_id: string;
+  health_status: string;
+  mergeable: string | null;
+  merge_state_status: string | null;
+  pr_state: string | null;
+  checks_status: string | null;
+  failing_checks: string;
+  pr_url: string | null;
+  detail: string | null;
+  checked_at: string;
+  auto_moved_at: string | null;
 };
 
 export type AgentEventRow = {

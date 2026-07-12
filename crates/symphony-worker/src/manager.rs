@@ -1,5 +1,5 @@
 use crate::{
-    backoff_ms, run_hook, sanitize_key,
+    backoff_ms, pr_health::run_pr_health_monitor, run_hook, sanitize_key,
     skills::{
         ensure_workspace_skills, github_token_env_has_token_for_repo_url,
         github_token_env_vars_for_repo_url,
@@ -562,6 +562,18 @@ async fn tick<T: TrackerClient>(
                 error = %err,
                 "failed to refresh issue that left the active set"
             ),
+        }
+    }
+
+    if config.workflow.front_matter.tracker.pr_health_enabled {
+        if let Err(err) = run_pr_health_monitor(
+            repo,
+            tracker,
+            &config.workflow.front_matter.tracker,
+        )
+        .await
+        {
+            warn!(error = %err, "PR health monitor failed");
         }
     }
 
@@ -1572,6 +1584,18 @@ mod tests {
         ) -> Result<Vec<symphony_tracker::WorkpadComment>, TrackerError> {
             Ok(Vec::new())
         }
+
+        async fn update_issue_state(
+            &self,
+            _issue_id: &str,
+            _state_name: &str,
+        ) -> Result<(), TrackerError> {
+            Ok(())
+        }
+
+        async fn append_workpad_note(&self, _issue_id: &str, _note: &str) -> Result<(), TrackerError> {
+            Ok(())
+        }
     }
 
     fn mock_driver(outcome: AgentOutcome) -> symphony_agents::MockAgentDriver {
@@ -2537,6 +2561,18 @@ printf cloned > hook-ran
             _issue_ids: &[String],
         ) -> Result<Vec<symphony_tracker::WorkpadComment>, TrackerError> {
             Ok(Vec::new())
+        }
+
+        async fn update_issue_state(
+            &self,
+            _issue_id: &str,
+            _state_name: &str,
+        ) -> Result<(), TrackerError> {
+            Ok(())
+        }
+
+        async fn append_workpad_note(&self, _issue_id: &str, _note: &str) -> Result<(), TrackerError> {
+            Ok(())
         }
     }
 

@@ -12,6 +12,20 @@ use uuid::Uuid;
 
 const SQLITE_BIND_CHUNK_SIZE: usize = 500;
 
+const ISSUE_SELECT_WITH_HEALTH: &str = r#"
+  select
+    i.id, i.identifier, i.title, i.description, i.priority, i.state,
+    i.branch, i.labels, i.blockers, i.pr_urls, i.raw, i.last_seen_at,
+    h.health_status as pr_health_status,
+    h.mergeable as pr_health_mergeable,
+    h.checks_status as pr_health_checks_status,
+    h.failing_checks as pr_health_failing_checks,
+    h.checked_at as pr_health_checked_at
+  from issues i
+  left join pr_health h on h.issue_id = i.id
+"#;
+
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type, FromRow)]
 pub struct WorkflowRow {
     pub id: String,
@@ -35,6 +49,26 @@ pub struct IssueRow {
     pub pr_urls: String,
     pub raw: String,
     pub last_seen_at: String,
+    pub pr_health_status: Option<String>,
+    pub pr_health_mergeable: Option<String>,
+    pub pr_health_checks_status: Option<String>,
+    pub pr_health_failing_checks: Option<String>,
+    pub pr_health_checked_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, FromRow)]
+pub struct PrHealthRow {
+    pub issue_id: String,
+    pub health_status: String,
+    pub mergeable: Option<String>,
+    pub merge_state_status: Option<String>,
+    pub pr_state: Option<String>,
+    pub checks_status: Option<String>,
+    pub failing_checks: String,
+    pub pr_url: Option<String>,
+    pub detail: Option<String>,
+    pub checked_at: String,
+    pub auto_moved_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, FromRow)]
@@ -1091,12 +1125,80 @@ impl Repository {
     }
 
     pub async fn list_issues(&self, limit: i64) -> Result<Vec<IssueRow>, StorageError> {
-        Ok(sqlx::query_as::<_, IssueRow>(
-            "select * from issues order by last_seen_at desc limit ?1",
-        )
+        let query = format!("{ISSUE_SELECT_WITH_HEALTH} order by i.last_seen_at desc limit ?1");
+        Ok(sqlx::query_as::<_, IssueRow>(&query)
         .bind(limit)
         .fetch_all(&self.pool)
         .await?)
+    }
+
+    /// Issues in any of the given states (case-insensitive) that have at least
+    /// one linked PR URL.
+    pub async fn list_issues_in_states_with_prs(
+        &self,
+        states: &[String],
+    ) -> Result<Vec<Issue>, StorageError> {
+        if states.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = (1..=states.len())
+            .map(|idx| format!("?{idx}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let query = format!(
+            r#"
+            select raw from issues
+            where lower(state) in ({placeholders})
+              and pr_urls != '[]'
+              and trim(pr_urls) != ''
+            "#
+        );
+        let mut rows = sqlx::query_as::<_, (String,)>(&query);
+        for state in states {
+            rows = rows.bind(state.to_lowercase());
+        }
+        let rows = rows.fetch_all(&self.pool).await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(raw,)| serde_json::from_str::<Issue>(&raw).ok())
+            .collect())
+    }
+
+    pub async fn upsert_pr_health(&self, row: &PrHealthRow) -> Result<(), StorageError> {
+        sqlx::query(
+            r#"
+            insert into pr_health (
+              issue_id, health_status, mergeable, merge_state_status, pr_state,
+              checks_status, failing_checks, pr_url, detail, checked_at, auto_moved_at
+            ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            on conflict(issue_id) do update set
+              health_status = excluded.health_status,
+              mergeable = excluded.mergeable,
+              merge_state_status = excluded.merge_state_status,
+              pr_state = excluded.pr_state,
+              checks_status = excluded.checks_status,
+              failing_checks = excluded.failing_checks,
+              pr_url = excluded.pr_url,
+              detail = excluded.detail,
+              checked_at = excluded.checked_at,
+              auto_moved_at = coalesce(excluded.auto_moved_at, pr_health.auto_moved_at)
+            "#,
+        )
+        .bind(&row.issue_id)
+        .bind(&row.health_status)
+        .bind(&row.mergeable)
+        .bind(&row.merge_state_status)
+        .bind(&row.pr_state)
+        .bind(&row.checks_status)
+        .bind(&row.failing_checks)
+        .bind(&row.pr_url)
+        .bind(&row.detail)
+        .bind(&row.checked_at)
+        .bind(&row.auto_moved_at)
+        .execute(&self.pool)
+        .await?;
+        self.changed("pr_health", "upsert");
+        Ok(())
     }
 
     /// Ids of issues whose stored state matches none of the given names,
@@ -1131,12 +1233,11 @@ impl Repository {
     }
 
     pub async fn get_issue(&self, id: &str) -> Result<Option<IssueRow>, StorageError> {
-        Ok(
-            sqlx::query_as::<_, IssueRow>("select * from issues where id = ?1")
-                .bind(id)
-                .fetch_optional(&self.pool)
-                .await?,
-        )
+        let query = format!("{ISSUE_SELECT_WITH_HEALTH} where i.id = ?1");
+        Ok(sqlx::query_as::<_, IssueRow>(&query)
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?)
     }
 
     pub async fn get_run_detail(
@@ -2978,5 +3079,40 @@ mod tests {
             .find(|session| session.run_id == run.id)
             .expect("live session should be present");
         assert_eq!(session.last_event_at, event.created_at);
+    }
+
+    #[tokio::test]
+    async fn stores_and_joins_pr_health_with_issues() {
+        let repo = repo().await;
+        let mut watched = issue();
+        watched.state = "in review".to_string();
+        watched.pr_urls = vec!["https://github.com/acme/widgets/pull/1".to_string()];
+        repo.upsert_issues(&[watched]).await.unwrap();
+        repo.upsert_pr_health(&PrHealthRow {
+            issue_id: "lin-1".to_string(),
+            health_status: "conflicting".to_string(),
+            mergeable: Some("CONFLICTING".to_string()),
+            merge_state_status: Some("DIRTY".to_string()),
+            pr_state: Some("OPEN".to_string()),
+            checks_status: Some("passing".to_string()),
+            failing_checks: "[]".to_string(),
+            pr_url: Some("https://github.com/acme/widgets/pull/1".to_string()),
+            detail: None,
+            checked_at: "2026-07-11T00:00:00.000Z".to_string(),
+            auto_moved_at: None,
+        })
+        .await
+        .unwrap();
+
+        let rows = repo.list_issues(10).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pr_health_status.as_deref(), Some("conflicting"));
+
+        let watched_issues = repo
+            .list_issues_in_states_with_prs(&["In Review".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(watched_issues.len(), 1);
+        assert_eq!(watched_issues[0].identifier, "SYM-1");
     }
 }

@@ -34,6 +34,19 @@ pub struct AppSettings {
     pub active_states: Vec<String>,
     #[serde(default = "default_terminal_states")]
     pub terminal_states: Vec<String>,
+    // PR health monitoring
+    #[serde(default = "default_true")]
+    pub pr_health_enabled: bool,
+    #[serde(default = "default_watch_states")]
+    pub watch_states: Vec<String>,
+    #[serde(default = "default_conflict_target_state")]
+    pub conflict_target_state: String,
+    #[serde(default = "default_true")]
+    pub auto_move_on_conflict: bool,
+    #[serde(default = "default_true")]
+    pub auto_move_on_ci_failure: bool,
+    #[serde(default = "default_ci_failure_target_state")]
+    pub ci_failure_target_state: String,
     // Worker
     #[serde(default = "default_polling_interval_ms")]
     pub polling_interval_ms: u64,
@@ -122,6 +135,12 @@ impl Default for AppSettings {
             tracker_assigned_to_me: false,
             active_states: default_active_states(),
             terminal_states: default_terminal_states(),
+            pr_health_enabled: true,
+            watch_states: default_watch_states(),
+            conflict_target_state: default_conflict_target_state(),
+            auto_move_on_conflict: true,
+            auto_move_on_ci_failure: true,
+            ci_failure_target_state: default_ci_failure_target_state(),
             polling_interval_ms: default_polling_interval_ms(),
             max_concurrent_agents: default_max_concurrent_agents(),
             max_retry_backoff_ms: default_max_retry_backoff_ms(),
@@ -171,6 +190,18 @@ fn default_active_states() -> Vec<String> {
 
 fn default_terminal_states() -> Vec<String> {
     ["Done", "Canceled"].map(String::from).to_vec()
+}
+
+fn default_watch_states() -> Vec<String> {
+    ["In Review"].map(String::from).to_vec()
+}
+
+fn default_conflict_target_state() -> String {
+    "Todo".to_string()
+}
+
+fn default_ci_failure_target_state() -> String {
+    "Todo".to_string()
 }
 
 fn default_polling_interval_ms() -> u64 {
@@ -297,6 +328,12 @@ pub fn workflow_from_settings(
             identifier_prefix: normalize_opt(&settings.tracker_prefix),
             project_id: normalize_opt(&settings.tracker_project_id),
             assigned_to_me: settings.tracker_assigned_to_me,
+            pr_health_enabled: settings.pr_health_enabled,
+            watch_states: settings.watch_states.clone(),
+            conflict_target_state: settings.conflict_target_state.clone(),
+            auto_move_on_conflict: settings.auto_move_on_conflict,
+            auto_move_on_ci_failure: settings.auto_move_on_ci_failure,
+            ci_failure_target_state: settings.ci_failure_target_state.clone(),
             ..TrackerConfig::default()
         },
         polling: PollingConfig {
@@ -484,6 +521,9 @@ mod tests {
             ["Todo", "In Progress", "Rework", "Merging"]
         );
         assert_eq!(settings.terminal_states, ["Done", "Canceled"]);
+        assert!(settings.pr_health_enabled);
+        assert_eq!(settings.watch_states, ["In Review"]);
+        assert_eq!(settings.conflict_target_state, "Todo");
         assert_eq!(settings.max_concurrent_agents, 3);
         assert!(settings.session_env.is_empty());
         assert!(settings.codex_network_access);

@@ -205,6 +205,12 @@ const previewSettings: AppSettings = {
   tracker_assigned_to_me: false,
   active_states: ["Todo", "In Progress", "Rework", "Merging"],
   terminal_states: ["Done", "Canceled"],
+  pr_health_enabled: true,
+  watch_states: ["In Review"],
+  conflict_target_state: "Todo",
+  auto_move_on_conflict: true,
+  auto_move_on_ci_failure: true,
+  ci_failure_target_state: "Todo",
   polling_interval_ms: 30000,
   max_concurrent_agents: 3,
   max_retry_backoff_ms: 300000,
@@ -367,6 +373,11 @@ const previewIssues: IssueRow[] = [
       project_id: null,
     }),
     last_seen_at: previewIso(-45_000),
+    pr_health_status: null,
+    pr_health_mergeable: null,
+    pr_health_checks_status: null,
+    pr_health_failing_checks: null,
+    pr_health_checked_at: null,
   },
   {
     id: "preview-issue-sym-61",
@@ -393,6 +404,11 @@ const previewIssues: IssueRow[] = [
       project_id: null,
     }),
     last_seen_at: previewIso(-4 * 60_000),
+    pr_health_status: "conflicting",
+    pr_health_mergeable: "CONFLICTING",
+    pr_health_checks_status: "passing",
+    pr_health_failing_checks: JSON.stringify([]),
+    pr_health_checked_at: previewIso(-2 * 60_000),
   },
   {
     id: "preview-issue-sym-57",
@@ -419,6 +435,11 @@ const previewIssues: IssueRow[] = [
       project_id: null,
     }),
     last_seen_at: previewIso(-25 * 60 * 60_000),
+    pr_health_status: "healthy",
+    pr_health_mergeable: "MERGEABLE",
+    pr_health_checks_status: "passing",
+    pr_health_failing_checks: JSON.stringify([]),
+    pr_health_checked_at: previewIso(-25 * 60 * 60_000),
   },
 ];
 
@@ -2636,6 +2657,7 @@ function IssuesTable({
         <tr>
           <th>Issue</th>
           <th>State</th>
+          <th>PR health</th>
           <th>Priority</th>
           <th>Last seen</th>
           {linearWorkspace ? <th /> : null}
@@ -2650,6 +2672,9 @@ function IssuesTable({
             </td>
             <td>
               <Badge status={issue.state} />
+            </td>
+            <td>
+              <PrHealthBadge issue={issue} />
             </td>
             <td>{priorityLabel(issue.priority)}</td>
             <td className="tnum" title={shortTime(issue.last_seen_at)}>
@@ -4179,6 +4204,98 @@ function SettingsView({
             <small className="hint">
               States that mean an issue is finished; its workspace can be cleaned up.
             </small>
+          </label>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={settings.pr_health_enabled}
+              disabled={!runtimeAvailable}
+              onChange={(e) =>
+                setSettings({
+                  ...settings,
+                  pr_health_enabled: e.currentTarget.checked,
+                })
+              }
+            />
+            <span>Monitor PR health in watch states</span>
+            <small className="hint">
+              While issues sit in watch states, Symphony polls linked GitHub PRs
+              for merge conflicts and failing CI checks.
+            </small>
+          </label>
+          <label>
+            Watch states
+            <ListInput
+              value={settings.watch_states}
+              disabled={!runtimeAvailable || !settings.pr_health_enabled}
+              separator="comma"
+              placeholder="In Review"
+              onChange={(next) => setSettings({ ...settings, watch_states: next })}
+            />
+            <small className="hint">
+              Non-active states to monitor. When a linked PR becomes conflicting
+              or CI fails, Symphony can auto-move the issue back for rework.
+            </small>
+          </label>
+          <label>
+            Conflict target state
+            <input
+              value={settings.conflict_target_state}
+              disabled={!runtimeAvailable || !settings.pr_health_enabled}
+              onChange={(e) =>
+                setSettings({
+                  ...settings,
+                  conflict_target_state: e.currentTarget.value,
+                })
+              }
+            />
+            <small className="hint">
+              Linear state to move issues into when a linked PR has merge conflicts.
+            </small>
+          </label>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={settings.auto_move_on_conflict}
+              disabled={!runtimeAvailable || !settings.pr_health_enabled}
+              onChange={(e) =>
+                setSettings({
+                  ...settings,
+                  auto_move_on_conflict: e.currentTarget.checked,
+                })
+              }
+            />
+            <span>Auto-move on merge conflict</span>
+          </label>
+          <label>
+            CI failure target state
+            <input
+              value={settings.ci_failure_target_state}
+              disabled={!runtimeAvailable || !settings.pr_health_enabled}
+              onChange={(e) =>
+                setSettings({
+                  ...settings,
+                  ci_failure_target_state: e.currentTarget.value,
+                })
+              }
+            />
+            <small className="hint">
+              Linear state to move issues into when required CI checks fail.
+            </small>
+          </label>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={settings.auto_move_on_ci_failure}
+              disabled={!runtimeAvailable || !settings.pr_health_enabled}
+              onChange={(e) =>
+                setSettings({
+                  ...settings,
+                  auto_move_on_ci_failure: e.currentTarget.checked,
+                })
+              }
+            />
+            <span>Auto-move on CI failure</span>
           </label>
           <div className="section-row">
             <button
@@ -5833,6 +5950,35 @@ function Empty({
 
 function Badge({ status }: { status: string }) {
   return <span className={`badge ${statusSlug(status)}`}>{status}</span>;
+}
+
+function PrHealthBadge({ issue }: { issue: IssueRow }) {
+  const prUrls = parseIssueStringList(issue.pr_urls);
+  if (prUrls.length === 0) {
+    return <span className="inline-meta">—</span>;
+  }
+
+  const status = issue.pr_health_status;
+  if (!status || status === "healthy" || status === "closed") {
+    return <span className="badge healthy">Healthy</span>;
+  }
+
+  if (status === "conflicting") {
+    return <span className="badge conflicting">PR conflict</span>;
+  }
+
+  if (status === "ci_failing") {
+    const failing = parseIssueStringList(issue.pr_health_failing_checks ?? "[]");
+    const detail =
+      failing.length > 0 ? ` (${failing.slice(0, 2).join(", ")}${failing.length > 2 ? ", …" : ""})` : "";
+    return (
+      <span className="badge ci-failing" title={failing.join(", ") || undefined}>
+        CI failing{detail}
+      </span>
+    );
+  }
+
+  return <span className="badge unknown">Checking…</span>;
 }
 
 function WaveMark() {

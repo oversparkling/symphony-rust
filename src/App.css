@@ -1351,17 +1351,29 @@ td strong {
   color: var(--warning-foreground);
 }
 
-.badge.high {
+.badge.high,
+.badge.conflicting {
   background: var(--destructive);
   color: var(--destructive-foreground);
 }
 
-.badge.medium {
+.badge.medium,
+.badge.ci-failing {
   background: var(--warning);
   color: var(--warning-foreground);
 }
 
 .badge.low {
+  background: var(--muted);
+  color: var(--muted-foreground);
+}
+
+.badge.healthy {
+  background: var(--success);
+  color: var(--success-foreground);
+}
+
+.badge.unknown {
   background: var(--muted);
   color: var(--muted-foreground);
 }

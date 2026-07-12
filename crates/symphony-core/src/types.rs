@@ -172,6 +172,20 @@ pub struct TrackerConfig {
     pub project_id: Option<String>,
     #[serde(default)]
     pub assigned_to_me: bool,
+    /// Poll linked PRs for merge conflicts and failing checks while issues sit
+    /// in watch states (e.g. In Review).
+    #[serde(default = "default_true")]
+    pub pr_health_enabled: bool,
+    #[serde(default = "default_watch_states")]
+    pub watch_states: Vec<String>,
+    #[serde(default = "default_conflict_target_state")]
+    pub conflict_target_state: String,
+    #[serde(default = "default_true")]
+    pub auto_move_on_conflict: bool,
+    #[serde(default = "default_true")]
+    pub auto_move_on_ci_failure: bool,
+    #[serde(default = "default_ci_failure_target_state")]
+    pub ci_failure_target_state: String,
 }
 
 impl Default for TrackerConfig {
@@ -184,8 +198,26 @@ impl Default for TrackerConfig {
             identifier_prefix: None,
             project_id: None,
             assigned_to_me: false,
+            pr_health_enabled: true,
+            watch_states: default_watch_states(),
+            conflict_target_state: default_conflict_target_state(),
+            auto_move_on_conflict: true,
+            auto_move_on_ci_failure: true,
+            ci_failure_target_state: default_ci_failure_target_state(),
         }
     }
+}
+
+fn default_watch_states() -> Vec<String> {
+    ["In Review"].map(String::from).to_vec()
+}
+
+fn default_conflict_target_state() -> String {
+    "Todo".to_string()
+}
+
+fn default_ci_failure_target_state() -> String {
+    "Todo".to_string()
 }
 
 fn default_tracker_endpoint() -> String {

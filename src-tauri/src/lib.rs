@@ -5,7 +5,7 @@ use std::{
     path::PathBuf,
 };
 use symphony_storage::{
-    now_iso, open_sqlite, AgentEventRow, EventBus, IssueRow, Overview, Repository,
+    now_iso, open_sqlite, AgentEventRow, EventBus, IssueRow, Overview, PrHealthRow, Repository,
     RetroBatchReservation, RetroBatchRow, RetroRow, RetroSuggestionRow, RunWithIssueRow,
     StorageEvent,
 };
@@ -1305,6 +1305,7 @@ fn export_bindings() {
             specta::ts::export::<RunWithIssueRow>(&conf),
             specta::ts::export::<RunDetail>(&conf),
             specta::ts::export::<IssueRow>(&conf),
+            specta::ts::export::<PrHealthRow>(&conf),
             specta::ts::export::<IssueDetail>(&conf),
             specta::ts::export::<AgentEventRow>(&conf),
             specta::ts::export::<WorkerStatus>(&conf),
