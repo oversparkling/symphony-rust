@@ -20,7 +20,8 @@ const ISSUE_SELECT_WITH_HEALTH: &str = r#"
     h.mergeable as pr_health_mergeable,
     h.checks_status as pr_health_checks_status,
     h.failing_checks as pr_health_failing_checks,
-    h.checked_at as pr_health_checked_at
+    h.checked_at as pr_health_checked_at,
+    h.detail as pr_health_detail
   from issues i
   left join pr_health h on h.issue_id = i.id
 "#;
@@ -54,6 +55,7 @@ pub struct IssueRow {
     pub pr_health_checks_status: Option<String>,
     pub pr_health_failing_checks: Option<String>,
     pub pr_health_checked_at: Option<String>,
+    pub pr_health_detail: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, FromRow)]

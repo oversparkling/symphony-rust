@@ -378,6 +378,7 @@ const previewIssues: IssueRow[] = [
     pr_health_checks_status: null,
     pr_health_failing_checks: null,
     pr_health_checked_at: null,
+    pr_health_detail: null,
   },
   {
     id: "preview-issue-sym-61",
@@ -409,6 +410,7 @@ const previewIssues: IssueRow[] = [
     pr_health_checks_status: "passing",
     pr_health_failing_checks: JSON.stringify([]),
     pr_health_checked_at: previewIso(-2 * 60_000),
+    pr_health_detail: null,
   },
   {
     id: "preview-issue-sym-57",
@@ -440,6 +442,7 @@ const previewIssues: IssueRow[] = [
     pr_health_checks_status: "passing",
     pr_health_failing_checks: JSON.stringify([]),
     pr_health_checked_at: previewIso(-25 * 60 * 60_000),
+    pr_health_detail: null,
   },
 ];
 
@@ -1810,6 +1813,7 @@ function App() {
           <IssuesView
             issues={issues}
             linearWorkspace={settings?.tracker_workspace ?? null}
+            watchStates={settings?.watch_states ?? []}
             onOpenSettings={() => setView("settings")}
           />
         ) : null}
@@ -2592,10 +2596,12 @@ function RepoFilterSelect({
 function IssuesView({
   issues,
   linearWorkspace,
+  watchStates,
   onOpenSettings,
 }: {
   issues: IssueRow[];
   linearWorkspace: string | null;
+  watchStates: string[];
   onOpenSettings: () => void;
 }) {
   const [mode, setMode] = useState<IssueViewMode>("list");
@@ -2636,7 +2642,11 @@ function IssuesView({
           ) : mode === "dependencies" ? (
             <DependencyGraphView graph={dependencyGraph} />
           ) : (
-            <IssuesTable issues={issues} linearWorkspace={linearWorkspace} />
+            <IssuesTable
+              issues={issues}
+              linearWorkspace={linearWorkspace}
+              watchStates={watchStates}
+            />
           )}
         </Panel>
       </section>
@@ -2647,9 +2657,11 @@ function IssuesView({
 function IssuesTable({
   issues,
   linearWorkspace,
+  watchStates,
 }: {
   issues: IssueRow[];
   linearWorkspace: string | null;
+  watchStates: string[];
 }) {
   return (
     <table>
@@ -2674,7 +2686,7 @@ function IssuesTable({
               <Badge status={issue.state} />
             </td>
             <td>
-              <PrHealthBadge issue={issue} />
+              <PrHealthBadge issue={issue} watchStates={watchStates} />
             </td>
             <td>{priorityLabel(issue.priority)}</td>
             <td className="tnum" title={shortTime(issue.last_seen_at)}>
@@ -5952,14 +5964,29 @@ function Badge({ status }: { status: string }) {
   return <span className={`badge ${statusSlug(status)}`}>{status}</span>;
 }
 
-function PrHealthBadge({ issue }: { issue: IssueRow }) {
+function PrHealthBadge({
+  issue,
+  watchStates,
+}: {
+  issue: IssueRow;
+  watchStates: string[];
+}) {
   const prUrls = parseIssueStringList(issue.pr_urls);
   if (prUrls.length === 0) {
     return <span className="inline-meta">—</span>;
   }
 
+  const monitored = watchStates.some((state) =>
+    issue.state.trim().toLowerCase() === state.trim().toLowerCase(),
+  );
   const status = issue.pr_health_status;
-  if (!status || status === "healthy" || status === "closed") {
+  if (!status) {
+    return (
+      <span className="badge unknown">{monitored ? "Checking…" : "—"}</span>
+    );
+  }
+
+  if (status === "healthy" || status === "closed") {
     return <span className="badge healthy">Healthy</span>;
   }
 
@@ -5978,7 +6005,19 @@ function PrHealthBadge({ issue }: { issue: IssueRow }) {
     );
   }
 
-  return <span className="badge unknown">Checking…</span>;
+  if (status === "check_failed") {
+    return (
+      <span className="badge check-failed" title={issue.pr_health_detail ?? undefined}>
+        Check failed
+      </span>
+    );
+  }
+
+  if (status === "pending" || (status === "unknown" && monitored)) {
+    return <span className="badge unknown">Checking…</span>;
+  }
+
+  return <span className="badge unknown" title={issue.pr_health_detail ?? undefined}>Unknown</span>;
 }
 
 function WaveMark() {

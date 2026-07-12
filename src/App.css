@@ -1378,6 +1378,11 @@ td strong {
   color: var(--muted-foreground);
 }
 
+.badge.check-failed {
+  background: var(--destructive);
+  color: var(--destructive-foreground);
+}
+
 .pulse {
   animation: pulse 1.3s infinite;
   background: var(--warning-solid);

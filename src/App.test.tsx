@@ -322,6 +322,7 @@ function issueRow({
     pr_health_checks_status: null,
     pr_health_failing_checks: null,
     pr_health_checked_at: null,
+    pr_health_detail: null,
   };
 }
 

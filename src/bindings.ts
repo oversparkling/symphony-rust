@@ -343,6 +343,7 @@ export type IssueRow = {
   pr_health_checks_status: string | null;
   pr_health_failing_checks: string | null;
   pr_health_checked_at: string | null;
+  pr_health_detail: string | null;
 };
 
 export type PrHealthRow = {

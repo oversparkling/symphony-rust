@@ -3,11 +3,14 @@
 //! Symphony can redispatch and resolve the problem.
 
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use symphony_core::{Issue, TrackerConfig};
 use symphony_storage::{now_iso, PrHealthRow, Repository};
 use symphony_tracker::TrackerClient;
 use tokio::process::Command;
 use tracing::{info, warn};
+
+use crate::skills::github_token_env_vars_for_repo_url;
 
 const FAILED_CHECK_CONCLUSIONS: &[&str] =
     &["FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED"];
@@ -18,6 +21,8 @@ pub enum PrHealthStatus {
     Conflicting,
     CiFailing,
     Closed,
+    Pending,
+    CheckFailed,
     Unknown,
 }
 
@@ -28,6 +33,8 @@ impl PrHealthStatus {
             Self::Conflicting => "conflicting",
             Self::CiFailing => "ci_failing",
             Self::Closed => "closed",
+            Self::Pending => "pending",
+            Self::CheckFailed => "check_failed",
             Self::Unknown => "unknown",
         }
     }
@@ -68,6 +75,8 @@ pub async fn run_pr_health_monitor<T: TrackerClient>(
     repo: &Repository,
     tracker: &T,
     tracker_config: &TrackerConfig,
+    process_env: &BTreeMap<String, String>,
+    session_env: &BTreeMap<String, String>,
 ) -> Result<(), PrHealthError> {
     if !tracker_config.pr_health_enabled || tracker_config.watch_states.is_empty() {
         return Ok(());
@@ -78,7 +87,16 @@ pub async fn run_pr_health_monitor<T: TrackerClient>(
         .await?;
 
     for issue in issues {
-        if let Err(err) = check_issue_pr_health(repo, tracker, tracker_config, &issue).await {
+        if let Err(err) = check_issue_pr_health(
+            repo,
+            tracker,
+            tracker_config,
+            process_env,
+            session_env,
+            &issue,
+        )
+        .await
+        {
             warn!(
                 issue = %issue.identifier,
                 error = %err,
@@ -94,11 +112,13 @@ async fn check_issue_pr_health<T: TrackerClient>(
     repo: &Repository,
     tracker: &T,
     tracker_config: &TrackerConfig,
+    process_env: &BTreeMap<String, String>,
+    session_env: &BTreeMap<String, String>,
     issue: &Issue,
 ) -> Result<(), PrHealthError> {
     let mut snapshots = Vec::new();
     for pr_url in &issue.pr_urls {
-        match check_pr_url(pr_url).await {
+        match check_pr_url(pr_url, process_env, session_env).await {
             Ok(snapshot) => snapshots.push(snapshot),
             Err(err) => {
                 warn!(
@@ -114,7 +134,7 @@ async fn check_issue_pr_health<T: TrackerClient>(
                     pr_state: "unknown".to_string(),
                     checks_status: "unknown".to_string(),
                     failing_checks: Vec::new(),
-                    health_status: PrHealthStatus::Unknown,
+                    health_status: PrHealthStatus::CheckFailed,
                     detail: Some(err.to_string()),
                 });
             }
@@ -247,24 +267,29 @@ fn aggregate_snapshots(snapshots: &[PrCheckSnapshot]) -> PrCheckSnapshot {
 
 fn health_rank(status: &PrHealthStatus) -> u8 {
     match status {
-        PrHealthStatus::Conflicting => 4,
-        PrHealthStatus::CiFailing => 3,
+        PrHealthStatus::Conflicting => 5,
+        PrHealthStatus::CiFailing => 4,
+        PrHealthStatus::CheckFailed => 3,
         PrHealthStatus::Unknown => 2,
+        PrHealthStatus::Pending => 1,
         PrHealthStatus::Closed => 1,
         PrHealthStatus::Healthy => 0,
     }
 }
 
-pub async fn check_pr_url(pr_url: &str) -> Result<PrCheckSnapshot, PrHealthError> {
+pub async fn check_pr_url(
+    pr_url: &str,
+    process_env: &BTreeMap<String, String>,
+    session_env: &BTreeMap<String, String>,
+) -> Result<PrCheckSnapshot, PrHealthError> {
     let script = format!(
         "gh pr view {} --json state,mergeable,mergeStateStatus,statusCheckRollup",
         shell_quote(pr_url)
     );
-    let output = Command::new("/bin/sh")
-        .arg("-lc")
-        .arg(&script)
-        .output()
-        .await?;
+    let mut cmd = Command::new("/bin/sh");
+    cmd.arg("-lc").arg(&script);
+    apply_github_auth(&mut cmd, pr_url, process_env, session_env);
+    let output = cmd.output().await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -309,7 +334,10 @@ fn classify_health(
         return PrHealthStatus::Conflicting;
     }
     if mergeable.eq_ignore_ascii_case("UNKNOWN") {
-        return PrHealthStatus::Unknown;
+        if !failing_checks.is_empty() {
+            return PrHealthStatus::CiFailing;
+        }
+        return PrHealthStatus::Pending;
     }
     if !failing_checks.is_empty() {
         return PrHealthStatus::CiFailing;
@@ -362,6 +390,47 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+fn apply_github_auth(
+    cmd: &mut Command,
+    pr_url: &str,
+    process_env: &BTreeMap<String, String>,
+    session_env: &BTreeMap<String, String>,
+) {
+    if let Some(path) = process_env.get("PATH").filter(|value| !value.trim().is_empty()) {
+        cmd.env("PATH", path);
+    }
+    for (key, value) in session_env {
+        if !value.trim().is_empty() {
+            cmd.env(key, value);
+        }
+    }
+    for key in github_token_env_vars_for_repo_url(pr_url) {
+        if session_env.contains_key(*key) {
+            continue;
+        }
+        if let Some(value) = process_env
+            .get(*key)
+            .filter(|value| !value.trim().is_empty())
+        {
+            cmd.env(*key, value);
+        } else if let Ok(value) = std::env::var(key) {
+            if !value.trim().is_empty() {
+                cmd.env(key, value);
+            }
+        }
+    }
+    if let Some(token) = session_env
+        .get("GH_TOKEN")
+        .or_else(|| session_env.get("GITHUB_TOKEN"))
+        .or_else(|| process_env.get("GH_TOKEN"))
+        .or_else(|| process_env.get("GITHUB_TOKEN"))
+        .filter(|value| !value.trim().is_empty())
+    {
+        cmd.env("GH_TOKEN", token);
+        cmd.env("GITHUB_TOKEN", token);
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PrHealthError {
     #[error("io error: {0}")]
@@ -396,6 +465,12 @@ mod tests {
     fn classifies_closed_pr() {
         let status = classify_health("MERGED", "MERGEABLE", "CLEAN", &[]);
         assert_eq!(status, PrHealthStatus::Closed);
+    }
+
+    #[test]
+    fn classifies_pending_mergeability() {
+        let status = classify_health("OPEN", "UNKNOWN", "CLEAN", &[]);
+        assert_eq!(status, PrHealthStatus::Pending);
     }
 
     #[test]

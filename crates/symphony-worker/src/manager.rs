@@ -570,6 +570,8 @@ async fn tick<T: TrackerClient>(
             repo,
             tracker,
             &config.workflow.front_matter.tracker,
+            &config.env,
+            &config.session_env,
         )
         .await
         {
