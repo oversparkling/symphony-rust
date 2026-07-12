@@ -16,6 +16,7 @@ use tauri::{Emitter, Manager, State};
 mod path_env;
 mod retro;
 mod settings;
+mod web_status;
 
 use retro::{parse_report, RetroDetail, RetroManager, RetroStatus};
 #[cfg(debug_assertions)]
@@ -712,8 +713,9 @@ pub fn run() {
                 database_path: db_path,
             };
             export_bindings();
-            forward_events(handle, bus);
             app.manage(state);
+            forward_events(handle.clone(), bus);
+            web_status::spawn(handle);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

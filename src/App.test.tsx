@@ -94,6 +94,8 @@ function testSettings(): AppSettings {
     opencode_agent: null,
     opencode_skip_permissions: true,
     linear_api_key_set: false,
+    web_status_url: null,
+    web_status_token: null,
   };
 }
 

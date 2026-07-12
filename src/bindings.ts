@@ -77,6 +77,8 @@ export type AppSettings = {
   opencode_agent: string | null;
   opencode_skip_permissions: boolean;
   linear_api_key_set: boolean;
+  web_status_url: string | null;
+  web_status_token: string | null;
 };
 
 export type SaveSettingsRequest = {

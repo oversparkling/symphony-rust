@@ -108,6 +108,11 @@ pub struct AppSettings {
     // Derived from the OS keychain; never user-edited.
     #[serde(default)]
     pub linear_api_key_set: bool,
+    // Personal web status dashboard (Vercel). Empty = sync disabled.
+    #[serde(default)]
+    pub web_status_url: Option<String>,
+    #[serde(default)]
+    pub web_status_token: Option<String>,
 }
 
 impl Default for AppSettings {
@@ -155,6 +160,8 @@ impl Default for AppSettings {
             opencode_agent: None,
             opencode_skip_permissions: true,
             linear_api_key_set: false,
+            web_status_url: None,
+            web_status_token: None,
         }
     }
 }

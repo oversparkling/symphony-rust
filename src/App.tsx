@@ -237,6 +237,8 @@ const previewSettings: AppSettings = {
   opencode_agent: null,
   opencode_skip_permissions: true,
   linear_api_key_set: true,
+  web_status_url: null,
+  web_status_token: null,
 };
 
 const previewSkillsStatuses: Record<string, SkillsStatus> = {
@@ -4023,6 +4025,45 @@ function SettingsView({
             <small className="hint">
               Max time for each hook script. Applies to hooks that start after
               Save; a hook already running keeps its current timeout.
+            </small>
+          </label>
+          <label>
+            Web status URL
+            <input
+              {...literalInputProps}
+              value={settings.web_status_url ?? ""}
+              disabled={!runtimeAvailable}
+              onChange={(e) =>
+                setSettings({
+                  ...settings,
+                  web_status_url: nullable(e.currentTarget.value),
+                })
+              }
+              placeholder="https://symphony-status.vercel.app"
+            />
+            <small className="hint">
+              Personal Vercel dashboard URL. Symphony pushes status and pulls
+              phone commands about every 15s when both URL and token are set.
+            </small>
+          </label>
+          <label>
+            Web status token
+            <input
+              {...literalInputProps}
+              type="password"
+              value={settings.web_status_token ?? ""}
+              disabled={!runtimeAvailable}
+              onChange={(e) =>
+                setSettings({
+                  ...settings,
+                  web_status_token: nullable(e.currentTarget.value),
+                })
+              }
+              placeholder="STATUS_TOKEN"
+            />
+            <small className="hint">
+              Same bearer token configured as <code>STATUS_TOKEN</code> on the
+              Vercel project. Never commit this value.
             </small>
           </label>
           <details className="hooks-details">
