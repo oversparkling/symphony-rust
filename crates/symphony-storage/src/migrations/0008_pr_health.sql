@@ -1,4 +1,4 @@
-create table pr_health (
+create table if not exists pr_health (
   issue_id text primary key references issues(id) on delete cascade,
   health_status text not null default 'unknown',
   mergeable text,
